@@ -1,0 +1,2 @@
+selenium>=4.11,<5
+webdriver-manager>=4.0,<5
