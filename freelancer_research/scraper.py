@@ -290,6 +290,30 @@ class FreelancerScraper:
                 const meta = card.querySelector('[data-test="project-card-meta"], .ProjectCard-meta, .JobSearchCard-primary-info');
                 const avgBid = card.querySelector('[data-test="project-card-avg-bid"], .ProjectCard-average, .JobSearchCard-average-bid strong');
                 const skills = Array.from(card.querySelectorAll('a[href*="/jobs/"], [data-test="project-skill"], .ProjectCard-skill')).map(el => el.textContent.trim());
+                const projectTypeCandidates = [];
+                const badgeSelectors = [
+                    '[data-test="project-card-badge"]',
+                    '[data-test="project-card-sealed"]',
+                    '[data-test="project-type"]',
+                    '.ProjectCard-badge',
+                    '.ProjectCard-badges span',
+                    '.JobSearchCard-badge',
+                    '.JobSearchCard-badges span'
+                ];
+                badgeSelectors.forEach(selector => {
+                    const el = card.querySelector(selector);
+                    if (el && el.textContent) {
+                        const text = el.textContent.trim();
+                        if (text) {
+                            projectTypeCandidates.push(text);
+                        }
+                    }
+                });
+                const sealedAttribute = card.getAttribute('data-sealed') || card.getAttribute('data-project-type');
+                if (sealedAttribute) {
+                    projectTypeCandidates.push(sealedAttribute.trim());
+                }
+                const projectType = projectTypeCandidates.find(text => text && text.length > 0) || null;
                 return {
                     title: link ? link.textContent.trim() : null,
                     url: link ? link.href : null,
@@ -300,6 +324,7 @@ class FreelancerScraper:
                     meta: meta ? meta.textContent.trim() : null,
                     avgBid: avgBid ? avgBid.textContent.trim() : null,
                     skills: skills,
+                    projectType: projectType,
                 };
             });
             """
@@ -338,11 +363,28 @@ class FreelancerScraper:
             bids_count=bids_count,
             average_bid=avg_bid_val,
             posted_time=payload.get("meta"),
+            project_type=self._normalize_project_type(payload.get("projectType")),
             skills=[skill for skill in (payload.get("skills") or []) if skill],
             employer=employer_profile,
             raw_attributes={key: val for key, val in payload.items() if key not in {"skills"}},
         )
         return summary
+
+    @staticmethod
+    def _normalize_project_type(raw_value: Optional[str]) -> Optional[str]:
+        if not raw_value:
+            return None
+
+        normalized = raw_value.strip()
+        if not normalized:
+            return None
+
+        lowered = normalized.lower()
+        if "sealed" in lowered:
+            return "sealed"
+        if any(token in lowered for token in ("standard", "open")):
+            return "standard"
+        return normalized
 
     def _parse_budget(
         self, budget_text: Optional[str]

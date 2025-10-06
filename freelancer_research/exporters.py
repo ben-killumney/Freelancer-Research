@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from .scraper import BidRecord, ProjectSummary
 
@@ -50,7 +50,7 @@ def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path
                     "bids_count": project.bids_count,
                     "average_bid": project.average_bid,
                     "posted_time": project.posted_time,
-                    "project_type": project.project_type,
+                    "project_type": _gao2025_project_type(project.project_type),
                     "skills": "|".join(project.skills),
                     "employer_name": project.employer.name,
                     "employer_rating": project.employer.rating,
@@ -98,3 +98,20 @@ def _flatten_bids(project_id: str, bids: List[BidRecord]):
 
 
 __all__ = ["export_projects_to_csv", "export_bids_to_csv"]
+
+
+def _gao2025_project_type(raw_value: Optional[str]) -> Optional[str]:
+    if not raw_value:
+        return None
+
+    lowered = raw_value.strip().lower()
+    if not lowered:
+        return None
+
+    if "sealed" in lowered:
+        return "sealed"
+
+    if any(token in lowered for token in ("standard", "open")):
+        return "standard"
+
+    return raw_value
