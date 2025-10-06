@@ -16,6 +16,7 @@ import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -70,6 +71,17 @@ class BidRecord:
 
 
 @dataclass
+class StatusSnapshot:
+    """Represents the observed status of a project at a point in time."""
+
+    status: Optional[str] = None
+    observed_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        return {"status": self.status, "observed_at": self.observed_at}
+
+
+@dataclass
 class ProjectSummary:
     """Structured representation of a Freelancer project listing."""
 
@@ -85,6 +97,11 @@ class ProjectSummary:
     average_bid: Optional[float] = None
     posted_time: Optional[str] = None
     project_type: Optional[str] = None
+    project_status: Optional[str] = None
+    status_history: List[StatusSnapshot] = field(default_factory=list)
+    scraped_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     skills: List[str] = field(default_factory=list)
     employer: EmployerProfile = field(default_factory=EmployerProfile)
     raw_attributes: Dict[str, Any] = field(default_factory=dict)
@@ -96,6 +113,7 @@ class ProjectSummary:
         payload = asdict(self)
         payload["employer"] = asdict(self.employer)
         payload["bids"] = [asdict(bid) for bid in self.bids]
+        payload["status_history"] = [snapshot.to_dict() for snapshot in self.status_history]
         return payload
 
 
@@ -200,6 +218,7 @@ class FreelancerScraper:
         results_per_page: int = 20,
         include_bids: bool = False,
         max_bids: Optional[int] = None,
+        capture_status_history: bool = True,
     ) -> List[ProjectSummary]:
         """Collect project listings for the supplied search terms.
 
@@ -221,6 +240,9 @@ class FreelancerScraper:
             process but is required for questions related to winner's curse.
         max_bids:
             Optional upper bound for the number of bids captured per project.
+        capture_status_history:
+            When ``True`` the scraper records the project status at the time of
+            scraping, mirroring the panel structure in Gao et al. (2025).
         """
 
         projects: List[ProjectSummary] = []
@@ -234,15 +256,32 @@ class FreelancerScraper:
                     continue
 
                 for summary in summaries:
-                    if include_bids:
+                    if include_bids or capture_status_history:
                         try:
-                            bid_records = self._collect_bids(summary.url, max_bids)
-                            summary.bids = bid_records
-                            summary.bids_count = summary.bids_count or len(bid_records)
+                            detail_data = self._collect_project_page_details(
+                                summary.url,
+                                include_bids=include_bids,
+                                max_bids=max_bids,
+                                existing_history=summary.status_history,
+                                existing_type=summary.project_type,
+                            )
+                            if include_bids:
+                                bid_records = detail_data.get("bids", [])
+                                summary.bids = bid_records
+                                summary.bids_count = summary.bids_count or len(bid_records)
+                            if detail_data.get("project_type"):
+                                summary.project_type = detail_data["project_type"]
+                            if detail_data.get("project_status"):
+                                summary.project_status = detail_data["project_status"]
+                            if "status_history" in detail_data:
+                                summary.status_history = detail_data["status_history"]
+                                if summary.status_history:
+                                    summary.project_status = summary.status_history[-1].status
                         except TimeoutException:
                             pass
                         finally:
                             self._close_extra_tabs()
+                    summary.project_type = summary.project_type or "open"
                     projects.append(summary)
                 self._human_delay()
         return projects
@@ -289,6 +328,9 @@ class FreelancerScraper:
                 const description = card.querySelector('[data-test="project-card-description"], .ProjectCard-description, .JobSearchCard-secondary-description');
                 const meta = card.querySelector('[data-test="project-card-meta"], .ProjectCard-meta, .JobSearchCard-primary-info');
                 const avgBid = card.querySelector('[data-test="project-card-avg-bid"], .ProjectCard-average, .JobSearchCard-average-bid strong');
+                const status = card.querySelector('[data-test="project-card-status"], .ProjectCard-status, .JobSearchCard-status, .JobSearchCard-badge--status');
+                const badges = Array.from(card.querySelectorAll('[data-test="project-card-badges"] *, [data-test="project-card-badge"], .ProjectCard-badges span, .JobSearchCard-tags span, .JobSearchCard-badges span, .JobSearchCard-badges a')).map(el => el.textContent.trim()).filter(Boolean);
+                const cardType = card.getAttribute('data-project-type') || (card.dataset ? (card.dataset.projectType || card.dataset.cardType) : null);
                 const skills = Array.from(card.querySelectorAll('a[href*="/jobs/"], [data-test="project-skill"], .ProjectCard-skill')).map(el => el.textContent.trim());
                 return {
                     title: link ? link.textContent.trim() : null,
@@ -299,6 +341,9 @@ class FreelancerScraper:
                     description: description ? description.textContent.trim() : null,
                     meta: meta ? meta.textContent.trim() : null,
                     avgBid: avgBid ? avgBid.textContent.trim() : null,
+                    statusText: status ? status.textContent.trim() : null,
+                    badges: badges,
+                    cardType: cardType,
                     skills: skills,
                 };
             });
@@ -326,6 +371,14 @@ class FreelancerScraper:
         avg_bid_val, avg_bid_currency = self._parse_amount(payload.get("avgBid"))
         bids_count = self._parse_bids_count(payload.get("bidsText"))
         employer_profile = self._parse_employer(payload.get("employer"))
+        status_text = self._clean_status_text(payload.get("statusText"))
+        scraped_at = self._current_timestamp()
+        project_type = self._infer_project_type(payload)
+        status_history = (
+            [StatusSnapshot(status=status_text, observed_at=scraped_at)]
+            if status_text
+            else []
+        )
         summary = ProjectSummary(
             project_id=project_id_match.group("project_id"),
             title=title,
@@ -338,6 +391,10 @@ class FreelancerScraper:
             bids_count=bids_count,
             average_bid=avg_bid_val,
             posted_time=payload.get("meta"),
+            project_type=project_type,
+            project_status=status_text,
+            status_history=status_history,
+            scraped_at=scraped_at,
             skills=[skill for skill in (payload.get("skills") or []) if skill],
             employer=employer_profile,
             raw_attributes={key: val for key, val in payload.items() if key not in {"skills"}},
@@ -392,10 +449,37 @@ class FreelancerScraper:
             location=location_match.group(1).strip() if location_match else None,
         )
 
-    def _collect_bids(self, project_url: str, max_bids: Optional[int]) -> List[BidRecord]:
+    def _collect_project_page_details(
+        self,
+        project_url: str,
+        *,
+        include_bids: bool,
+        max_bids: Optional[int],
+        existing_history: Optional[Sequence[StatusSnapshot]] = None,
+        existing_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         self._open_in_new_tab(project_url)
         wait = WebDriverWait(self.driver, self.timeout)
         wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+
+        detail_payload = self.driver.execute_script(
+            """
+            const status = document.querySelector('[data-test="project-status"], [data-test="project-card-status"], .ProjectView-status, .ProjectHeader-status, .StatusLabel, .ProjectStatus, .JobView-status');
+            const meta = document.querySelector('[data-test="project-meta"], .ProjectMeta, .ProjectHeader-meta, .JobView-meta, .JobInfo');
+            const auctionType = document.querySelector('[data-test="project-auction-type"], .ProjectView-privacy span, .ProjectView-badges span, .ProjectHeader-badge, .JobView-badge');
+            const badges = Array.from(document.querySelectorAll('[data-test="project-badge"], .ProjectView-badges span, .ProjectHeader-badge, .JobView-badges span, .Badge, .Badges span, .ProjectHeader-tags span')).map(el => el.textContent.trim()).filter(Boolean);
+            const typeContainer = document.querySelector('[data-project-type], [data-auction-type], [data-test="project-type"]');
+            const cardType = typeContainer ? (typeContainer.getAttribute('data-project-type') || typeContainer.getAttribute('data-auction-type') || typeContainer.dataset?.projectType) : null;
+            return {
+                statusText: status ? status.textContent.trim() : null,
+                metaText: meta ? meta.textContent.trim() : null,
+                auctionTypeText: auctionType ? auctionType.textContent.trim() : null,
+                badges: badges,
+                cardType: cardType,
+            };
+            """
+        ) or {}
+
         data_blobs = self.driver.execute_script(
             """
             const results = [];
@@ -410,7 +494,45 @@ class FreelancerScraper:
             """
         )
 
-        for blob in data_blobs:
+        bids: List[BidRecord] = []
+        if include_bids:
+            bids = self._collect_bids_from_blobs(data_blobs, max_bids)
+
+        status_text = self._clean_status_text(
+            detail_payload.get("statusText") or detail_payload.get("metaText")
+        )
+        project_type = self._infer_project_type(detail_payload, fallback=existing_type)
+        scraped_at = self._current_timestamp()
+        history_seed = list(existing_history or [])
+        additions: List[StatusSnapshot] = []
+        if status_text:
+            additions.append(StatusSnapshot(status=status_text, observed_at=scraped_at))
+        merged_history = (
+            self._merge_status_history(history_seed, additions)
+            if additions
+            else history_seed
+        )
+        project_status = merged_history[-1].status if merged_history else status_text
+
+        return {
+            "bids": bids,
+            "project_type": project_type,
+            "project_status": project_status,
+            "status_history": merged_history,
+        }
+
+    def _collect_bids(self, project_url: str, max_bids: Optional[int]) -> List[BidRecord]:
+        details = self._collect_project_page_details(
+            project_url,
+            include_bids=True,
+            max_bids=max_bids,
+        )
+        return details.get("bids", [])
+
+    def _collect_bids_from_blobs(
+        self, blobs: Sequence[str], max_bids: Optional[int]
+    ) -> List[BidRecord]:
+        for blob in blobs:
             try:
                 data = json.loads(blob)
             except json.JSONDecodeError:
@@ -419,6 +541,63 @@ class FreelancerScraper:
             if bid_records:
                 return bid_records
         return []
+
+    def _merge_status_history(
+        self,
+        base: Sequence[StatusSnapshot],
+        additions: Sequence[StatusSnapshot],
+    ) -> List[StatusSnapshot]:
+        merged: List[StatusSnapshot] = list(base)
+        seen = {(snap.status, snap.observed_at) for snap in merged}
+        for snapshot in additions:
+            key = (snapshot.status, snapshot.observed_at)
+            if key in seen:
+                continue
+            merged.append(snapshot)
+            seen.add(key)
+        merged.sort(key=lambda snap: ((snap.observed_at or ""), snap.status or ""))
+        return merged
+
+    def _infer_project_type(
+        self, payload: Dict[str, Any], *, fallback: Optional[str] = None
+    ) -> Optional[str]:
+        tokens: List[str] = []
+        candidate_keys = (
+            "project_type",
+            "cardType",
+            "statusText",
+            "meta",
+            "metaText",
+            "auctionTypeText",
+            "badges",
+            "description",
+            "title",
+        )
+        for key in candidate_keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                if value:
+                    tokens.append(value.lower())
+            elif isinstance(value, (list, tuple, set)):
+                tokens.extend(str(item).lower() for item in value if item)
+        if any(re.search(r"sealed|private|confidential|hidden", text) for text in tokens):
+            return "sealed"
+        if any(re.search(r"open|public", text) for text in tokens):
+            return "open"
+        if fallback:
+            return fallback
+        if tokens:
+            return "open"
+        return None
+
+    def _clean_status_text(self, status: Optional[str]) -> Optional[str]:
+        if not status:
+            return None
+        cleaned = re.sub(r"\s+", " ", status).strip()
+        return cleaned or None
+
+    def _current_timestamp(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
 
     def _extract_bids_from_blob(self, data: Any, max_bids: Optional[int]) -> List[BidRecord]:
         bids: List[BidRecord] = []
@@ -527,6 +706,7 @@ __all__ = [
     "FreelancerScraper",
     "ProjectSummary",
     "BidRecord",
+    "StatusSnapshot",
     "EmployerProfile",
     "default_scraper_from_env",
     "save_projects_to_disk",

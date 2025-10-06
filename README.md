@@ -14,6 +14,11 @@ entrants, or how employer reputation interacts with bidding behaviour.
 - **Bid harvesting** – Optionally follows each project to capture bidder level
   information (bid amount, promised delivery time, bidder reputation metrics),
   which is essential for studying phenomena like the winner's curse.
+- **Auction format detection** – Flags whether each project is an open or
+  sealed auction, matching the variables used by Gao et al. (2025).
+- **Status snapshots** – Records the project status (open, closed, frozen, etc.)
+  at the scrape timestamp so that single-sweep collections can be aligned with
+  longitudinal designs.
 - **Flexible exports** – Save results as JSON or CSV files for downstream
   analysis in Python, R, or statistical packages.
 - **Polite defaults** – Headless browsing with randomised delays, plus hooks to
@@ -66,8 +71,10 @@ python -m freelancer_research.cli --search "machine learning" --include-bids
 ### Output Structure
 
 - **Project summaries** include the project id, title, description, budget
-  bounds, bid counts, employer reputation snippets, and detected skills. When
-  exported to CSV, skills are pipe-delimited for easier parsing.
+  bounds, bid counts, employer reputation snippets, detected skills, auction
+  format (open vs sealed), and the observed project status plus timestamped
+  history entries. When exported to CSV, skills are pipe-delimited for easier
+  parsing and status histories are serialised as JSON for reproducibility.
 - **Bid level records** (optional) contain project id, bidder username,
   reputation metrics, offered amount, currency code, stated delivery days, and
   status. These fields are sufficient to construct panels for welfare analyses
