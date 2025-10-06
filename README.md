@@ -16,6 +16,9 @@ entrants, or how employer reputation interacts with bidding behaviour.
   which is essential for studying phenomena like the winner's curse.
 - **Flexible exports** – Save results as JSON or CSV files for downstream
   analysis in Python, R, or statistical packages.
+- **Longitudinal observations** – Stamp each scrape with UTC timestamps and an
+  optional run identifier so repeated captures can be stitched into time-series
+  panels.
 - **Polite defaults** – Headless browsing with randomised delays, plus hooks to
   authenticate via environment variables when deeper data requires login.
 
@@ -47,7 +50,9 @@ python -m freelancer_research.cli \
   --results-per-page 50 \
   --include-bids \
   --max-bids 40 \
-  --output data/projects.json \
+  --run-id "$(date -u +"%Y%m%dT%H%M%SZ")" \
+  --append \
+  --output data/projects.jsonl \
   --bids-output data/bids.csv
 ```
 
@@ -67,12 +72,17 @@ python -m freelancer_research.cli --search "machine learning" --include-bids
 
 - **Project summaries** include the project id, title, description, budget
   bounds, bid counts, employer reputation snippets, and detected skills. When
-  exported to CSV, skills are pipe-delimited for easier parsing.
+  exported to CSV, skills are pipe-delimited for easier parsing. Additional
+  metadata includes an `observed_at` timestamp, the optional `observation_run_id`
+  set via `--run-id`, and a `status_events` array capturing observed statuses
+  and bid counts over time.
 - **Bid level records** (optional) contain project id, bidder username,
   reputation metrics, offered amount, currency code, stated delivery days, and
-  status. These fields are sufficient to construct panels for welfare analyses
-  such as bid dispersion, newcomer versus incumbent success, or estimating
-  access cliffs.
+  status. They are enriched with `observed_at` timestamps and the originating
+  run identifier, making it easier to align bid changes with project level
+  observations. These fields are sufficient to construct panels for welfare
+  analyses such as bid dispersion, newcomer versus incumbent success, or
+  estimating access cliffs.
 
 ### Research Considerations
 
@@ -92,6 +102,77 @@ python -m freelancer_research.cli --search "machine learning" --include-bids
   authentication.
 - Run `python -m compileall .` before committing changes to ensure syntax
   correctness.
+
+## Building a Longitudinal Dataset
+
+Recurring executions let you monitor how projects evolve (status changes,
+incoming bids, budget adjustments). Two common scheduling approaches are shown
+below. Replace the sample search term and output paths as needed.
+
+### Cron
+
+Add an entry with `crontab -e` to run the scraper every hour, appending to JSONL
+and CSV outputs while stamping each run with a unique identifier:
+
+```
+0 * * * * cd /path/to/Freelancer-Research && \
+  /usr/bin/env python -m freelancer_research.cli \
+    --search "data entry" \
+    --pages 2 \
+    --results-per-page 50 \
+    --include-bids \
+    --run-id "$(date -u +\"%Y%m%dT%H%M%SZ\")" \
+    --append \
+    --output data/projects.jsonl \
+    --bids-output data/bids.csv >> logs/scraper.log 2>&1
+```
+
+### systemd timers
+
+Create a service unit (e.g. `/etc/systemd/system/freelancer-scraper.service`):
+
+```
+[Unit]
+Description=Freelancer.com longitudinal scraper
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/Freelancer-Research
+ExecStart=/usr/bin/env python -m freelancer_research.cli \
+  --search "data entry" \
+  --pages 2 \
+  --include-bids \
+  --results-per-page 50 \
+  --run-id "$(date -u +\"%Y%m%dT%H%M%SZ\")" \
+  --append \
+  --output data/projects.jsonl \
+  --bids-output data/bids.csv
+```
+
+Then define the timer (`/etc/systemd/system/freelancer-scraper.timer`):
+
+```
+[Unit]
+Description=Run Freelancer scraper hourly
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable and start the timer with:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now freelancer-scraper.timer
+```
+
+The `Persistent=true` flag ensures missed runs execute on boot, keeping your
+time-series dataset up to date.
 
 ## License
 

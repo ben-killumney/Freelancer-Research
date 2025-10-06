@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import csv
+import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, List
 
 from .scraper import BidRecord, ProjectSummary
 
 
-def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path) -> None:
+def export_projects_to_csv(
+    projects: Iterable[ProjectSummary],
+    output_path: Path,
+    *,
+    append: bool = False,
+) -> None:
     """Write high-level project summaries to a CSV file."""
 
     fieldnames = [
@@ -30,12 +37,20 @@ def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path
         "employer_rating",
         "employer_review_count",
         "employer_location",
+        "observed_at",
+        "observation_run_id",
+        "status_events",
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as csvfile:
+    mode = "a" if append and output_path.exists() else "w"
+    write_header = True
+    if mode == "a" and output_path.exists():
+        write_header = output_path.stat().st_size == 0
+    with output_path.open(mode, encoding="utf-8", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         for project in projects:
             writer.writerow(
                 {
@@ -56,11 +71,22 @@ def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path
                     "employer_rating": project.employer.rating,
                     "employer_review_count": project.employer.review_count,
                     "employer_location": project.employer.location,
+                    "observed_at": project.observed_at,
+                    "observation_run_id": project.observation_run_id,
+                    "status_events": json.dumps(
+                        [asdict(event) for event in project.status_events],
+                        ensure_ascii=False,
+                    ),
                 }
             )
 
 
-def export_bids_to_csv(projects: Iterable[ProjectSummary], output_path: Path) -> None:
+def export_bids_to_csv(
+    projects: Iterable[ProjectSummary],
+    output_path: Path,
+    *,
+    append: bool = False,
+) -> None:
     """Write all captured bids to a CSV file."""
 
     fieldnames = [
@@ -72,12 +98,19 @@ def export_bids_to_csv(projects: Iterable[ProjectSummary], output_path: Path) ->
         "currency_code",
         "delivery_days",
         "status",
+        "observed_at",
+        "observation_run_id",
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as csvfile:
+    mode = "a" if append and output_path.exists() else "w"
+    write_header = True
+    if mode == "a" and output_path.exists():
+        write_header = output_path.stat().st_size == 0
+    with output_path.open(mode, encoding="utf-8", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         for project in projects:
             for bid in _flatten_bids(project.project_id, project.bids):
                 writer.writerow(bid)
@@ -94,6 +127,8 @@ def _flatten_bids(project_id: str, bids: List[BidRecord]):
             "currency_code": bid.currency_code,
             "delivery_days": bid.delivery_days,
             "status": bid.status,
+            "observed_at": bid.observed_at,
+            "observation_run_id": bid.observation_run_id,
         }
 
 
