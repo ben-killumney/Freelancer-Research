@@ -26,18 +26,36 @@ def _load_terms(search_terms: Sequence[str], search_file: Path | None) -> List[s
 
 
 def _export_data(projects: Iterable[ProjectSummary], args: argparse.Namespace) -> None:
+    project_list = list(projects)
     output_path: Path = args.output
+    append = bool(args.append)
     if output_path.suffix.lower() == ".json":
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: list[dict] = []
+        if append and output_path.exists():
+            try:
+                with output_path.open("r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                    if isinstance(loaded, list):
+                        existing = loaded
+            except json.JSONDecodeError:
+                existing = []
         with output_path.open("w", encoding="utf-8") as fh:
-            json.dump([project.to_dict() for project in projects], fh, indent=2)
+            json.dump(existing + [project.to_dict() for project in project_list], fh, indent=2)
+    elif output_path.suffix.lower() == ".jsonl":
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if append or output_path.exists() else "w"
+        with output_path.open(mode, encoding="utf-8") as fh:
+            for project in project_list:
+                fh.write(json.dumps(project.to_dict()))
+                fh.write("\n")
     elif output_path.suffix.lower() == ".csv":
-        export_projects_to_csv(projects, output_path)
+        export_projects_to_csv(project_list, output_path, append=append)
     else:
-        raise ValueError("Unsupported output format. Use .json or .csv")
+        raise ValueError("Unsupported output format. Use .json, .jsonl, or .csv")
 
     if args.bids_output:
-        export_bids_to_csv(projects, args.bids_output)
+        export_bids_to_csv(project_list, args.bids_output, append=append)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -110,6 +128,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Optional CSV file to receive bid level data when --include-bids is used.",
     )
     parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append results to existing outputs instead of overwriting them.",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Identifier for the scrape run to help correlate longitudinal exports.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         help="Seed for the random delay generator to ensure reproducible pacing.",
@@ -135,6 +162,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             results_per_page=args.results_per_page,
             include_bids=args.include_bids,
             max_bids=args.max_bids,
+            observation_run_id=args.run_id,
         )
     _export_data(projects, args)
 

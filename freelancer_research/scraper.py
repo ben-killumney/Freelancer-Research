@@ -16,6 +16,7 @@ import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -46,6 +47,12 @@ PROJECT_ID_RE = re.compile(r"(?P<project_id>\\d{5,})")
 BID_COUNT_RE = re.compile(r"(\\d+)")
 
 
+def _utc_now_iso() -> str:
+    """Return a UTC timestamp (with trailing Z) for serialization."""
+
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
 @dataclass
 class EmployerProfile:
     """Summary information about the employer who posted a project."""
@@ -67,6 +74,19 @@ class BidRecord:
     currency_code: Optional[str] = None
     delivery_days: Optional[int] = None
     status: Optional[str] = None
+    observed_at: str = field(default_factory=_utc_now_iso)
+    observation_run_id: Optional[str] = None
+
+
+@dataclass
+class StatusEvent:
+    """Represents an observation of the project's lifecycle state."""
+
+    status: Optional[str] = None
+    observed_at: str = field(default_factory=_utc_now_iso)
+    run_id: Optional[str] = None
+    bids_count: Optional[int] = None
+    average_bid: Optional[float] = None
 
 
 @dataclass
@@ -89,6 +109,9 @@ class ProjectSummary:
     employer: EmployerProfile = field(default_factory=EmployerProfile)
     raw_attributes: Dict[str, Any] = field(default_factory=dict)
     bids: List[BidRecord] = field(default_factory=list)
+    observed_at: str = field(default_factory=_utc_now_iso)
+    observation_run_id: Optional[str] = None
+    status_events: List[StatusEvent] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the dataclass (including nested dataclasses) to a dictionary."""
@@ -96,6 +119,7 @@ class ProjectSummary:
         payload = asdict(self)
         payload["employer"] = asdict(self.employer)
         payload["bids"] = [asdict(bid) for bid in self.bids]
+        payload["status_events"] = [asdict(event) for event in self.status_events]
         return payload
 
 
@@ -200,6 +224,7 @@ class FreelancerScraper:
         results_per_page: int = 20,
         include_bids: bool = False,
         max_bids: Optional[int] = None,
+        observation_run_id: Optional[str] = None,
     ) -> List[ProjectSummary]:
         """Collect project listings for the supplied search terms.
 
@@ -234,11 +259,29 @@ class FreelancerScraper:
                     continue
 
                 for summary in summaries:
+                    observed_at = _utc_now_iso()
+                    summary.observed_at = observed_at
+                    summary.observation_run_id = observation_run_id
+                    status_event = StatusEvent(
+                        status=summary.raw_attributes.get("status")
+                        or summary.project_type,
+                        observed_at=observed_at,
+                        run_id=observation_run_id,
+                        bids_count=summary.bids_count,
+                        average_bid=summary.average_bid,
+                    )
+                    summary.status_events.append(status_event)
                     if include_bids:
                         try:
-                            bid_records = self._collect_bids(summary.url, max_bids)
+                            bid_records = self._collect_bids(
+                                summary.url,
+                                max_bids,
+                                observed_at=observed_at,
+                                observation_run_id=observation_run_id,
+                            )
                             summary.bids = bid_records
                             summary.bids_count = summary.bids_count or len(bid_records)
+                            status_event.bids_count = summary.bids_count
                         except TimeoutException:
                             pass
                         finally:
@@ -247,10 +290,26 @@ class FreelancerScraper:
                 self._human_delay()
         return projects
 
-    def dump_to_json(self, projects: Iterable[ProjectSummary], output_path: Path) -> None:
+    def dump_to_json(
+        self,
+        projects: Iterable[ProjectSummary],
+        output_path: Path,
+        *,
+        append: bool = False,
+    ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        new_records = [project.to_dict() for project in projects]
+        existing: List[Dict[str, Any]] = []
+        if append and output_path.exists():
+            try:
+                with output_path.open("r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                    if isinstance(loaded, list):
+                        existing = loaded
+            except json.JSONDecodeError:
+                existing = []
         with output_path.open("w", encoding="utf-8") as fh:
-            json.dump([project.to_dict() for project in projects], fh, indent=2)
+            json.dump(existing + new_records, fh, indent=2)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -392,7 +451,14 @@ class FreelancerScraper:
             location=location_match.group(1).strip() if location_match else None,
         )
 
-    def _collect_bids(self, project_url: str, max_bids: Optional[int]) -> List[BidRecord]:
+    def _collect_bids(
+        self,
+        project_url: str,
+        max_bids: Optional[int],
+        *,
+        observed_at: Optional[str] = None,
+        observation_run_id: Optional[str] = None,
+    ) -> List[BidRecord]:
         self._open_in_new_tab(project_url)
         wait = WebDriverWait(self.driver, self.timeout)
         wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
@@ -415,20 +481,46 @@ class FreelancerScraper:
                 data = json.loads(blob)
             except json.JSONDecodeError:
                 continue
-            bid_records = self._extract_bids_from_blob(data, max_bids)
+            bid_records = self._extract_bids_from_blob(
+                data,
+                max_bids,
+                observed_at=observed_at,
+                observation_run_id=observation_run_id,
+            )
             if bid_records:
                 return bid_records
         return []
 
-    def _extract_bids_from_blob(self, data: Any, max_bids: Optional[int]) -> List[BidRecord]:
+    def _extract_bids_from_blob(
+        self,
+        data: Any,
+        max_bids: Optional[int],
+        *,
+        observed_at: Optional[str] = None,
+        observation_run_id: Optional[str] = None,
+    ) -> List[BidRecord]:
         bids: List[BidRecord] = []
 
         def traverse(node: Any) -> None:
             if isinstance(node, dict):
                 if {"bids", "project"}.issubset(node.keys()):
-                    bids.extend(self._convert_bid_payloads(node["bids"], max_bids))
+                    bids.extend(
+                        self._convert_bid_payloads(
+                            node["bids"],
+                            max_bids,
+                            observed_at=observed_at,
+                            observation_run_id=observation_run_id,
+                        )
+                    )
                 elif "bids" in node and isinstance(node["bids"], list):
-                    bids.extend(self._convert_bid_payloads(node["bids"], max_bids))
+                    bids.extend(
+                        self._convert_bid_payloads(
+                            node["bids"],
+                            max_bids,
+                            observed_at=observed_at,
+                            observation_run_id=observation_run_id,
+                        )
+                    )
                 for value in node.values():
                     traverse(value)
             elif isinstance(node, list):
@@ -439,7 +531,12 @@ class FreelancerScraper:
         return bids[:max_bids] if max_bids else bids
 
     def _convert_bid_payloads(
-        self, payloads: Sequence[Any], max_bids: Optional[int]
+        self,
+        payloads: Sequence[Any],
+        max_bids: Optional[int],
+        *,
+        observed_at: Optional[str] = None,
+        observation_run_id: Optional[str] = None,
     ) -> List[BidRecord]:
         bid_records: List[BidRecord] = []
         for payload in payloads[: max_bids or None]:
@@ -463,6 +560,9 @@ class FreelancerScraper:
                 delivery_days=self._safe_int(payload.get("period") or payload.get("delivery_time")),
                 status=payload.get("status"),
             )
+            if observed_at:
+                bid_record.observed_at = observed_at
+            bid_record.observation_run_id = observation_run_id
             bid_records.append(bid_record)
         return bid_records
 
@@ -516,11 +616,13 @@ def default_scraper_from_env() -> FreelancerScraper:
 def save_projects_to_disk(
     projects: Iterable[ProjectSummary],
     output: Path,
+    *,
+    append: bool = False,
 ) -> None:
     """Persist collected project data to JSON."""
 
     scraper = FreelancerScraper()
-    scraper.dump_to_json(projects, output)
+    scraper.dump_to_json(projects, output, append=append)
 
 
 __all__ = [
@@ -528,6 +630,7 @@ __all__ = [
     "ProjectSummary",
     "BidRecord",
     "EmployerProfile",
+    "StatusEvent",
     "default_scraper_from_env",
     "save_projects_to_disk",
 ]
