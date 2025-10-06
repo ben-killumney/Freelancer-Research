@@ -82,6 +82,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Maximum number of bids to retain per project.",
     )
     parser.add_argument(
+        "--capture-status-history",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Capture the project status snapshot during the scrape (default: True).",
+    )
+    parser.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -135,6 +141,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             results_per_page=args.results_per_page,
             include_bids=args.include_bids,
             max_bids=args.max_bids,
+            capture_status_history=args.capture_status_history,
         )
     _export_data(projects, args)
 

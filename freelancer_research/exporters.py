@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Iterable, List
 
@@ -25,6 +26,10 @@ def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path
         "average_bid",
         "posted_time",
         "project_type",
+        "project_status",
+        "status_history",
+        "status_observed_at",
+        "scraped_at",
         "skills",
         "employer_name",
         "employer_rating",
@@ -51,6 +56,16 @@ def export_projects_to_csv(projects: Iterable[ProjectSummary], output_path: Path
                     "average_bid": project.average_bid,
                     "posted_time": project.posted_time,
                     "project_type": project.project_type,
+                    "project_status": project.project_status,
+                    "status_history": json.dumps(
+                        [snapshot.to_dict() for snapshot in project.status_history]
+                    ),
+                    "status_observed_at": (
+                        project.status_history[-1].observed_at
+                        if project.status_history
+                        else None
+                    ),
+                    "scraped_at": project.scraped_at,
                     "skills": "|".join(project.skills),
                     "employer_name": project.employer.name,
                     "employer_rating": project.employer.rating,
